@@ -394,6 +394,9 @@ export async function saveRate(property: Property, input: Record<string, unknown
   if (input.start_date && input.end_date && String(input.end_date) < String(input.start_date)) {
     throw new AppError(400, "Rate end date must be on or after the start date.", "invalid_dates");
   }
+  if (!input.start_date && !input.end_date) {
+    throw new AppError(400, "Set a start or end date. The room category selling price is used otherwise.", "validation");
+  }
   const payload = {
     property_id: property.id,
     category_id: input.category_id,

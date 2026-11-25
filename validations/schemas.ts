@@ -98,15 +98,20 @@ export const roomPatchSchema = roomSchema.extend({
 });
 
 export const rateSchema = z.object({
-  body: z.object({
-    category_id: uuid,
-    name: z.string().trim().min(2).max(80),
-    price: money,
-    start_date: date.nullable().optional(),
-    end_date: date.nullable().optional(),
-    min_stay: z.coerce.number().int().min(1).max(30).optional().default(1),
-    is_active: z.boolean().optional().default(true),
-  }),
+  body: z
+    .object({
+      category_id: uuid,
+      name: z.string().trim().min(2).max(80),
+      price: money,
+      start_date: date.nullable().optional(),
+      end_date: date.nullable().optional(),
+      min_stay: z.coerce.number().int().min(1).max(30).optional().default(1),
+      is_active: z.boolean().optional().default(true),
+    })
+    .refine((body) => Boolean(body.start_date || body.end_date), {
+      message: "Set a start or end date. The room category selling price is used otherwise.",
+      path: ["start_date"],
+    }),
   query: z.object({}).optional().default({}),
   params: z.object({ propertyId: uuid }),
 });

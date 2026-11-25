@@ -49,9 +49,18 @@ async function releaseExtraRooms(reservation: { category_id: string; check_in: s
 const RESERVATION_COLUMNS =
   "id, property_id, category_id, room_id, confirmation_code, guest_name, guest_email, guest_phone, check_in, check_out, adults, children, status, total_amount, currency, special_requests, payment_status, hold_expires_at, created_at, updated_at";
 
+function isDatedRate(rate: RoomRate) {
+  return Boolean(rate.start_date || rate.end_date);
+}
+
+/** Only dated seasonal rates override category base_price. Undated rates are ignored for price. */
 function rateForDate(rates: RoomRate[], date: string) {
   const matches = rates.filter(
-    (rate) => rate.is_active && (!rate.start_date || rate.start_date <= date) && (!rate.end_date || rate.end_date >= date),
+    (rate) =>
+      rate.is_active &&
+      isDatedRate(rate) &&
+      (!rate.start_date || rate.start_date <= date) &&
+      (!rate.end_date || rate.end_date >= date),
   );
   matches.sort((a, b) => (b.start_date ?? "").localeCompare(a.start_date ?? ""));
   return matches[0] ?? null;
