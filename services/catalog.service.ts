@@ -55,6 +55,8 @@ export function publicCategoryFields(category: RoomCategory) {
 
 function presentCategory(row: RoomCategory, roomCount?: number) {
   const details = unpackDetails(row.amenities);
+  const actual = roomCount ?? 0;
+  const configured = details.room_count || 0;
   return {
     ...row,
     amenities: details.items,
@@ -64,7 +66,7 @@ function presentCategory(row: RoomCategory, roomCount?: number) {
     rate_plan: details.rate_plan,
     rate_plan_note: details.rate_plan_note,
     refundable: details.refundable,
-    room_count: details.room_count || roomCount || 0,
+    room_count: actual > 0 ? actual : configured,
   };
 }
 
@@ -206,6 +208,16 @@ export async function updateCategory(property: Property, categoryId: string, raw
   const input = raw as unknown as CategoryInput;
   await assertOperational(property);
   const previous = await categoryForProperty(property.id, categoryId);
+  const previousDetails = unpackDetails(previous.amenities);
+  const { data: roomRows, error: roomRowsError } = await supabaseAdmin.from("rooms").select("id").eq("category_id", categoryId);
+  assertNoError(roomRowsError);
+  const actualRooms = roomRows?.length ?? 0;
+  let roomCount = input.room_count ?? 1;
+  const configured = previousDetails.room_count || 0;
+  if (roomCount === configured && actualRooms !== roomCount) {
+    roomCount = actualRooms;
+  }
+  const categoryInput = { ...input, room_count: roomCount };
   const images = await publishImages(property.id, input.images);
   const { data, error } = await supabaseAdmin
     .from("room_categories")
@@ -214,7 +226,7 @@ export async function updateCategory(property: Property, categoryId: string, raw
       description: input.description ?? "",
       max_occupancy: input.max_occupancy,
       base_price: input.base_price,
-      amenities: packAmenities(input),
+      amenities: packAmenities(categoryInput),
       images,
       booking_policy: input.booking_policy ?? "",
       is_active: input.is_active !== false,
@@ -224,7 +236,12 @@ export async function updateCategory(property: Property, categoryId: string, raw
     .select("*")
     .single();
   assertNoError(error);
-  await syncCategoryRooms(property, categoryId, input.room_count ?? 1);
+  await syncCategoryRooms(property, categoryId, roomCount);
+  const { count: syncedRooms, error: syncedError } = await supabaseAdmin
+    .from("rooms")
+    .select("id", { count: "exact", head: true })
+    .eq("category_id", categoryId);
+  assertNoError(syncedError);
   await logActivity({
     actorId,
     propertyId: property.id,
@@ -236,7 +253,7 @@ export async function updateCategory(property: Property, categoryId: string, raw
       changes: fieldChanges(previous, data, ["name", "description", "max_occupancy", "base_price", "booking_policy", "is_active"]),
     },
   });
-  return presentCategory(data as RoomCategory, input.room_count ?? 1);
+  return presentCategory(data as RoomCategory, syncedRooms ?? roomCount);
 }
 
 export async function deleteCategory(property: Property, categoryId: string, actorId: string) {
@@ -412,12 +429,21 @@ export async function saveRate(property: Property, input: Record<string, unknown
     : supabaseAdmin.from("room_rates").insert(payload);
   const { data, error } = await query.select("*").single();
   assertNoError(error);
+  if (input.sync_category_default) {
+    const { error: categoryError } = await supabaseAdmin
+      .from("room_categories")
+      .update({ base_price: input.price })
+      .eq("id", input.category_id)
+      .eq("property_id", property.id);
+    assertNoError(categoryError);
+  }
   await logActivity({
     actorId,
     propertyId: property.id,
     action: rateId ? "rate.updated" : "rate.created",
     entityType: "room_rate",
     entityId: (data as RoomRate).id,
+    metadata: input.sync_category_default ? { synced_category_default: true, base_price: input.price } : undefined,
   });
   return data;
 }

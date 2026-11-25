@@ -107,6 +107,7 @@ export const rateSchema = z.object({
       end_date: date.nullable().optional(),
       min_stay: z.coerce.number().int().min(1).max(30).optional().default(1),
       is_active: z.boolean().optional().default(true),
+      sync_category_default: z.boolean().optional().default(false),
     })
     .refine((body) => Boolean(body.start_date || body.end_date), {
       message: "Set a start or end date. The room category selling price is used otherwise.",
