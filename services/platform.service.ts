@@ -103,13 +103,31 @@ export async function savePlan(input: Record<string, unknown>, actorId: string, 
   return data;
 }
 
-export async function listSubscriptions(query: { status?: string; limit: number; offset: number }) {
+async function idsFor(table: "properties" | "subscription_plans" | "room_categories", column: "name" | "city", value: string) {
+  const request = supabaseAdmin.from(table).select("id");
+  const filtered = column === "city" ? request.or(`name.ilike.%${value}%,city.ilike.%${value}%`) : request.ilike("name", `%${value}%`);
+  const { data, error } = await filtered;
+  assertNoError(error);
+  return (data ?? []).map((row) => row.id as string);
+}
+
+export async function listSubscriptions(query: { q?: string; status?: string; limit: number; offset: number }) {
   let request = supabaseAdmin
     .from("subscriptions")
     .select("*, plan:subscription_plans(name, price_monthly, price_yearly), property:properties(id, name, slug, status)", { count: "exact" })
     .order("current_period_end")
     .range(query.offset, query.offset + query.limit - 1);
   if (query.status) request = request.eq("status", query.status);
+  const q = safeSearch(query.q);
+  if (q) {
+    const [propertyIds, planIds] = await Promise.all([idsFor("properties", "city", q), idsFor("subscription_plans", "name", q)]);
+    const parts = [
+      ...(propertyIds.length ? [`property_id.in.(${propertyIds.join(",")})`] : []),
+      ...(planIds.length ? [`plan_id.in.(${planIds.join(",")})`] : []),
+    ];
+    if (parts.length === 0) return { subscriptions: [], count: 0 };
+    request = request.or(parts.join(","));
+  }
   const { data, error, count } = await request;
   assertNoError(error);
   return { subscriptions: data ?? [], count: count ?? 0 };
@@ -220,24 +238,69 @@ export async function patchSubscription(
   );
 }
 
-export async function listPlatformBookings(query: { status?: string; limit: number; offset: number }) {
+function stayNights(checkIn: string, checkOut: string) {
+  const ms = new Date(`${checkOut}T00:00:00Z`).getTime() - new Date(`${checkIn}T00:00:00Z`).getTime();
+  return Math.max(1, Math.round(ms / 86_400_000));
+}
+
+function presentPlatformBooking(row: Record<string, unknown>) {
+  const total = Number(row.total_amount);
+  const nights = stayNights(String(row.check_in), String(row.check_out));
+  const payments = (row.payments ?? []) as Array<{ amount: number; status: string; type: string }>;
+  const paid = payments
+    .filter((payment) => payment.type === "guest_booking" && payment.status === "paid")
+    .reduce((sum, payment) => sum + Number(payment.amount), 0);
+  const advance = paid > 0 ? paid : row.payment_status === "paid" ? total : 0;
+  const category = row.category as { name?: string } | { name?: string }[] | null;
+  const categoryName = Array.isArray(category) ? category[0]?.name : category?.name;
+  return {
+    ...row,
+    category_name: categoryName || "Room",
+    nights,
+    nightly_price: Math.round((total / nights) * 100) / 100,
+    advance: Math.round(advance * 100) / 100,
+    remaining: Math.round(Math.max(0, total - advance) * 100) / 100,
+  };
+}
+
+export async function listPlatformBookings(query: { q?: string; status?: string; limit: number; offset: number }) {
   let request = supabaseAdmin
     .from("reservations")
     .select(
-      "id, confirmation_code, guest_name, guest_email, check_in, check_out, status, total_amount, currency, payment_status, created_at, property:properties(name, slug)",
+      "id, confirmation_code, guest_name, guest_email, check_in, check_out, status, total_amount, currency, payment_status, created_at, property:properties(name, slug), category:room_categories(name), payments(amount, status, type)",
       { count: "exact" },
     )
     .order("created_at", { ascending: false })
     .range(query.offset, query.offset + query.limit - 1);
   if (query.status) request = request.eq("status", query.status);
+  const q = safeSearch(query.q);
+  if (q) {
+    const [propertyIds, categoryIds] = await Promise.all([idsFor("properties", "city", q), idsFor("room_categories", "name", q)]);
+    const parts = [
+      `guest_name.ilike.%${q}%`,
+      `guest_email.ilike.%${q}%`,
+      `confirmation_code.ilike.%${q}%`,
+      ...(propertyIds.length ? [`property_id.in.(${propertyIds.join(",")})`] : []),
+      ...(categoryIds.length ? [`category_id.in.(${categoryIds.join(",")})`] : []),
+    ];
+    request = request.or(parts.join(","));
+  }
   const { data, error, count } = await request;
   assertNoError(error);
-  return { bookings: data ?? [], count: count ?? 0 };
+  return { bookings: (data ?? []).map((row) => presentPlatformBooking(row as Record<string, unknown>)), count: count ?? 0 };
 }
 
-export async function listLogs(query: { limit: number; offset: number }) {
+function logType(log: { summary?: string; detail?: { kind?: string } }) {
+  if (log.detail?.kind === "updated") return "Update";
+  if (/^Cancelled/.test(log.summary || "")) return "Cancel";
+  if (log.detail?.kind === "removed") return "Delete";
+  return "Create";
+}
+
+export async function listLogs(query: { q?: string; status?: string; limit: number; offset: number }) {
   const since = new Date();
   since.setUTCDate(since.getUTCDate() - 365);
+  const searching = Boolean(safeSearch(query.q) || query.status);
   const { data, error, count } = await supabaseAdmin
     .from("activity_logs")
     .select("id, actor_id, property_id, action, entity_type, entity_id, metadata, created_at, actor:profiles(full_name, email), property:properties(name)", {
@@ -245,12 +308,25 @@ export async function listLogs(query: { limit: number; offset: number }) {
     })
     .gte("created_at", since.toISOString())
     .order("created_at", { ascending: false })
-    .range(query.offset, query.offset + query.limit - 1);
+    .range(searching ? 0 : query.offset, searching ? 399 : query.offset + query.limit - 1);
   assertNoError(error);
-  const logs = fillPreviousChanges(data ?? []).map((row) => ({
+  let logs = fillPreviousChanges(data ?? []).map((row) => ({
     ...row,
     summary: summarizeActivity(row.action, (row.metadata ?? {}) as Record<string, unknown>),
     detail: activityDetail(row.action, (row.metadata ?? {}) as Record<string, unknown>),
   }));
-  return { logs, count: count ?? 0 };
+  const q = safeSearch(query.q).toLowerCase();
+  if (q) {
+    logs = logs.filter((log) => {
+      const actor = log.actor as { full_name?: string; email?: string } | { full_name?: string; email?: string }[] | null;
+      const person = Array.isArray(actor) ? actor[0] : actor;
+      const property = log.property as { name?: string } | { name?: string }[] | null;
+      const hotel = Array.isArray(property) ? property[0]?.name : property?.name;
+      return [person?.full_name, person?.email, hotel, log.summary, log.action].some((value) => String(value ?? "").toLowerCase().includes(q));
+    });
+  }
+  if (query.status) logs = logs.filter((log) => logType(log) === query.status);
+  const matched = logs.length;
+  if (searching) logs = logs.slice(query.offset, query.offset + query.limit);
+  return { logs, count: searching ? matched : count ?? 0 };
 }
