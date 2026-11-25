@@ -18,9 +18,14 @@ app.use(
         callback(null, true);
         return;
       }
-      callback(new Error("Origin is not allowed."));
+      if (env.nodeEnv !== "production") {
+        console.warn(`CORS blocked origin: ${origin}. Allowed: ${env.clientOrigins.join(", ")}`);
+      }
+      callback(null, false);
     },
+    methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
+    optionsSuccessStatus: 204,
   }),
 );
 

@@ -29,12 +29,23 @@ if (!parsed.success) {
   throw new Error(`Invalid backend environment.\n${details}`);
 }
 
+function collectOrigins(...values: string[]) {
+  const set = new Set<string>();
+  for (const value of values) {
+    for (const part of value.split(",")) {
+      const origin = part.trim().replace(/\/$/, "");
+      if (origin) set.add(origin);
+    }
+  }
+  return [...set];
+}
+
 export const env = {
   port: parsed.data.PORT,
   nodeEnv: parsed.data.NODE_ENV,
   supabaseUrl: parsed.data.SUPABASE_URL,
   supabaseServiceRoleKey: parsed.data.SUPABASE_SERVICE_ROLE_KEY,
-  clientOrigins: parsed.data.CLIENT_ORIGINS.split(",").map((origin) => origin.trim()).filter(Boolean),
+  clientOrigins: collectOrigins(parsed.data.CLIENT_ORIGINS, parsed.data.APP_BOOKING_URL, parsed.data.APP_ADMIN_URL),
   bookingUrl: parsed.data.APP_BOOKING_URL.replace(/\/$/, ""),
   adminUrl: parsed.data.APP_ADMIN_URL.replace(/\/$/, ""),
   smtpHost: parsed.data.SMTP_HOST,
